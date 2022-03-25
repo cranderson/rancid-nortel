@@ -1,0 +1,361 @@
+From: "Anderson, Charles R" <cra@wpi.edu>
+To: "rancid-discuss@shrubbery.net" <rancid-discuss@shrubbery.net>
+Date: Thu, 21 Feb 2019 13:53:05 -0500
+Subject: [PATCH] Nortel/Avaya BayStack/ERS support
+
+The attached files add support for Bay Networks/Nortel/Avaya BayStack/BPS/ERS switches.  I based these changes on ones we've been running in production for over a decade and I've tested this extensively on models BPS 2000, 470, and ERS 25xx/45xx/55xx/56xx.
+
+Initially I copied clogin to bslogin, but I've attached a diff from the original clogin because I believe it should be safe to apply to the original and eliminate the need for a separate login script.  I rearranged a few conditionals related to Extreme support to make the logic easier for the BayStack and other future differences.
+
+It was a PITA to get past the BayStack login banner, but I finally found a workable solution that should hopefully not interfere with other device types and should support BayStacks that have the stock banner, a custom banner, or the banner turned off.  The only potential concern for impact to non-BayStack devices is the matching on "##+" used to skip past the banner to avoid it being interpreted as a "#" prompt character.  I'm now running this in production as my "clogin" and so far there have been no impacts to Aruba devices, the only other devices I have that use clogin.
+
+rancid.types.conf entry:
+
+# Nortel BayStack
+baystack;script;rancid -t baystack
+baystack;login;clogin
+baystack;module;baystack
+baystack;inloop;baystack::inloop
+baystack;command;baystack::ShowSysInfo;show sys-info
+baystack;command;baystack::ShowSysInfo;show stack-info
+baystack;command;baystack::ShowSysInfo;show system verbose
+baystack;command;baystack::ShowSysInfo;show interfaces gbic-info
+baystack;command;baystack::ShowConfig;show running-config
+
+--- /usr/libexec/rancid/clogin	2019-02-06 02:03:27.000000000 -0500
++++ /usr/local/libexec/rancid/bslogin	2019-02-20 15:40:04.747945375 -0500
+@@ -1,7 +1,5 @@
+ #! /usr/bin/expect --
+ ##
+-## $Id: clogin.in 3943 2019-01-18 16:18:34Z heas $
+-##
+ ## rancid 3.9
+ ## Copyright (c) 1997-2018 by Henry Kilmer and John Heasley
+ ## All rights reserved.
+@@ -46,7 +44,8 @@
+ #  The original looking glass software was written by Ed Kern, provided by
+ #  permission and modified beyond recognition.
+ #
+-# clogin - Cisco login
++# bslogin - Bay Networks/Nortel/Avaya BayStack/BPS/ERS login script
++#	    Supports models BPS 2000, 470, ERS 25xx/45xx/55xx/56xx.
+ #
+ # Most options are intuitive for logging into a Cisco router.
+ # The default is to enable (thus -noenable).  Some folks have
+@@ -646,6 +645,23 @@
+ 	-re "Press the <tab> key \[^\r\n]+\[\r\n]+"	{
+ 				  exp_continue
+ 				}
++	-re "##+"	        {
++				  # BayStacks have a default banner that spells out NORTEL or AVAYA in huge
++				  # letters made from ## that look like prompt characters, so we need to skip
++				  # over them.
++				  exp_continue
++				}
++	-re "Enter Ctrl-Y to begin" {
++				  # After the default or custom banner, BayStacks prompt for Ctrl-Y and
++				  # then display a static banner with model and version info surrounded
++	                          # by an asterisk border.  Discard the top and bottom of the border and
++	                          # send a Ctrl-Y and remember that this is a baystack for logout procedure.
++				  set platform "baystack"
++				  expect -ex "***************************************************************" {}
++				  expect -ex "***************************************************************" {}
++				  send "\031"
++				  exp_continue
++			      }
+ 	-re "@\[^\r\n]+ $p_prompt"	{
+ 				  # ssh pwd prompt
+ 				  sleep 1
+@@ -803,10 +819,16 @@
+ 	return 0
+     }
+ 
+-    if { [string compare "extreme" "$platform"] } {
+-	send -h "exit\r"
+-    } else {
++    if { ![string compare "extreme" "$platform"] } {
+ 	send -h "quit\r"
++    } elseif { ![string compare "baystack" "$platform"] } {
++	# BayStacks use logout to completely exit, but they
++	# can also exit back to a menu interface, so send L
++	# to logout from the menu too just in case.
++	send -- "logout\r"
++	send -- "L"
++    } else {
++	send -h "exit\r"
+     }
+     expect {
+ 	-re "^\[^\n\r *]*$reprompt"		{
+@@ -1058,7 +1080,15 @@
+ 				}
+     }
+     if { $do_command || $do_script } {
+-	if { [string compare "extreme" "$platform"] } {
++	if { ![string compare "extreme" "$platform"] } {
++	    send "disable clipaging\r"
++	    expect -re $prompt		{}
++	} elseif { ![string compare "baystack" "$platform"] } {
++	    send -- "terminal length 0\r"
++	    expect -re $prompt		{}
++	    send -- "terminal width 131\r"
++	    expect -re $prompt		{}
++	} else {
+ 	    # If the prompt is (enable), then we are on a cataylyst switch and
+ 	    # the command is "set length 0"; otherwise its "terminal length 0".
+ 	    if [regexp -- ".*> .*enable" "$prompt"] {
+@@ -1073,9 +1103,6 @@
+ 		send "terminal width 132\r"
+ 	    }
+ 	    expect -re $prompt		{}
+-	} else {
+-	    send "disable clipaging\r"
+-	    expect -re $prompt		{}
+ 	}
+     }
+     if { $do_command } {
+--- /dev/null	2022-02-22 11:01:02.502098685 -0500
++++ /usr/local/share/perl5/rancid/baystack.pm	2020-05-28 17:11:58.000000000 -0400
+@@ -0,0 +1,243 @@
++package baystack;
++##
++## rancid 3.9
++## Copyright (c) 1997-2018 by Henry Kilmer and John Heasley
++## All rights reserved.
++##
++## This code is derived from software contributed to and maintained by
++## Henry Kilmer, John Heasley, Andrew Partan,
++## Pete Whiting, Austin Schutz, and Andrew Fort.
++##
++## Redistribution and use in source and binary forms, with or without
++## modification, are permitted provided that the following conditions
++## are met:
++## 1. Redistributions of source code must retain the above copyright
++##    notice, this list of conditions and the following disclaimer.
++## 2. Redistributions in binary form must reproduce the above copyright
++##    notice, this list of conditions and the following disclaimer in the
++##    documentation and/or other materials provided with the distribution.
++## 3. Neither the name of RANCID nor the names of its
++##    contributors may be used to endorse or promote products derived from
++##    this software without specific prior written permission.
++##
++## THIS SOFTWARE IS PROVIDED BY Henry Kilmer, John Heasley AND CONTRIBUTORS
++## ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++## TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++## PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COMPANY OR CONTRIBUTORS
++## BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++## CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++## SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++## INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++## CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++## ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++## POSSIBILITY OF SUCH DAMAGE.
++##
++## It is the request of the authors, but not a condition of license, that
++## parties packaging or redistributing RANCID NOT distribute altered versions
++## of the etc/rancid.types.base file nor alter how this file is processed nor
++## when in relation to etc/rancid.types.conf.  The goal of this is to help
++## suppress our support costs.  If it becomes a problem, this could become a
++## condition of license.
++# 
++#  The expect login scripts were based on Erik Sherk's gwtn, by permission.
++# 
++#  The original looking glass software was written by Ed Kern, provided by
++#  permission and modified beyond recognition.
++# 
++#  RANCID - Really Awesome New Cisco confIg Differ
++#
++#  baystack.pm - Bay Networks/Nortel/Avaya BayStack rancid procedures
++#
++
++use 5.010;
++use strict 'vars';
++use warnings;
++require(Exporter);
++our @ISA = qw(Exporter);
++$Exporter::Verbose=1;
++
++use rancid 3.12;
++
++@ISA = qw(Exporter rancid main);
++#our @EXPORT = qw($VERSION)
++
++# load-time initialization
++sub import {
++    0;
++}
++
++# post-open(collection file) initialization
++sub init {
++    # add content lines and separators
++    ProcessHistory("","","","!RANCID-CONTENT-TYPE: $devtype\n!\n");
++
++    0;
++}
++
++# main loop of input of device output
++sub inloop {
++    my($INPUT, $OUTPUT) = @_;
++    my($cmd, $rval);
++
++TOP:
++    while(<$INPUT>) {
++	tr/\015//d;
++	if ( (/(>|#)\s?logout/) || $found_end ) {
++	    print STDERR "Found logout statement, ending\n" if ($debug);
++	    delete($commands{'logout'});
++	    $clean_run=1;
++	    last;
++	}
++	if (/^Error:/) {
++	    print STDOUT ("$host bslogin error: $_");
++	    print STDERR ("$host bslogin error: $_") if ($debug);
++	    $clean_run=0;
++	    last;
++	}
++	while (/(^.*[>|#])\s*($cmds_regexp)\s*$/) {
++	    $cmd = $2;
++	    print STDERR "Doing $cmd\n";
++	    if (!defined($prompt)) {
++		$prompt = $1;
++		print STDERR ("PROMPT MATCH: $prompt\n") if ($debug);
++	    }
++	    print STDERR ("HIT COMMAND:$_") if ($debug);
++	    if (! defined($commands{$cmd})) {
++		print STDERR "$host: found unexpected command - \"$cmd\"\n";
++		$clean_run = 0;
++		last TOP;
++	    }
++	    if (! defined(&{$commands{$cmd}})) {
++		printf(STDERR "$host: undefined function - \"%s\"\n",  
++		       $commands{$cmd});
++		$clean_run = 0;
++		last TOP;
++	    }
++	    print STDERR "Calling \"$cmd\"\n" if ($debug);
++	    $rval = &{$commands{$cmd}}($INPUT, $OUTPUT, $cmd);
++	    delete($commands{$cmd});
++	    if ($rval == -1) {
++		$clean_run = 0;
++		last TOP;
++	    }
++	}
++    }
++}
++
++# This routine parses "show running-config"
++sub ShowConfig {
++    my($INPUT, $OUTPUT, $cmd) = @_;
++    my($lines) = 0;
++    print STDERR "    In ShowConfig: $_" if ($debug);
++
++    ProcessHistory("","","","! $_");
++
++    # baystacks refuse to turn off linewrapping, so we have to
++    # carefully reconstruct the unwrapped line
++    my $line = '';
++    my $bit;
++    while ($bit = <$INPUT>) {
++	$bit =~ tr/\015//d;
++	if (length($bit) >= 132) {
++	    # tack onto previous
++	    chomp($line);
++	    $line .= $bit;
++	} else {
++	    if ($line) {
++		chomp($line);
++		$line .= $bit;
++	    } else {
++		$line = $bit;
++	    }
++	    $line =~ tr/\015//d;
++	    
++	    if ($line =~ /^\s*\^\s*$/) {
++		$line = '';
++		next;
++	    }
++	    return(1) if $line =~ /invalid command name/;
++	    return(1) if $line =~ /Invalid input detected at/;
++	    
++	    if ($line =~ /^$prompt/) {
++		print STDERR "Found prompt, finishing ShowConfig\n" if ($debug);
++		$found_end++;
++		last;
++	    }
++
++	    $lines++;
++
++	    if ($line =~ /^! clock set /) {
++	    	    ProcessHistory("","","","! clock set \n");
++		    $line = '';
++		    next;
++	    }
++
++	    if ($filter_pwds >= 1) {
++	    	if ($line =~ /(cli password .* read-.*\b )/) {
++	    	    ProcessHistory("","","","! $1<removed>\n");
++		    $line = '';
++	    	    next;
++	    	} elsif ($line =~ /(radius-server (key|password) )/) {
++	    	    ProcessHistory("","","","! $1<removed>\n");
++		    $line = '';
++	    	    next;
++	    	}
++	    }
++
++	    if ($filter_commstr) {
++	    	if ($line =~ /(snmp-server community ).*( r[o|w])/) {
++	    	    ProcessHistory("","","","! $1<removed>$2\n");
++		    $line = '';
++	    	    next;
++	    	}
++	    }
++
++	    ProcessHistory("","","","$line");
++	    $line = '';
++	}
++    }
++
++    $_ = $line;
++
++    if ($lines < 3) {
++	printf(STDERR "ERROR: $host configuration appears truncated.\n");
++	$found_end = 0;
++	return(-1);
++    }
++
++    return(0);
++}
++
++# This routine parses "show sys-info" and "show stack-info"
++sub ShowSysInfo {
++    my($INPUT, $OUTPUT, $cmd) = @_;
++    print STDERR "    In ShowSysInfo: $_" if $debug;
++    print STDERR "    prompt is \"$prompt\"\n" if $debug;
++
++    while(<$INPUT>){
++	tr/\015//d;
++
++	next if /^\s*\^\s*$/;
++	return(1) if /invalid command name/;
++	return(1) if /Invalid input detected at/;
++
++	next if /Reset Count:/;
++	next if /Last Reset Type:/;
++	next if /sysUpTime:/;
++	next if /sysNtpTime/;
++	next if /sysRtcTime/;
++
++
++	if(/^$prompt/){
++	    print STDERR "Found prompt, finishing ShowSysInfo\n" if $debug;
++	    ProcessHistory("SYSINFO","","","! \n");
++	    return(0);
++	}
++	ProcessHistory("SYSINFO","","","!SYSINFO: $_");
++    }
++
++    ProcessHistory("SYSINFO","","","! \n");
++    return(0);
++}
++
++1;

@@ -1,0 +1,14 @@
+# RANCiD device type configuration for Nortel Baystack
+# Append the following lines to your existing rancid.types.conf
+#
+# Nortel BayStack
+baystack;script;rancid -t baystack
+baystack;login;bslogin
+baystack;module;baystack
+baystack;inloop;baystack::inloop
+baystack;command;baystack::ShowSysInfo;show sys-info
+baystack;command;baystack::ShowSysInfo;show stack-info
+baystack;command;baystack::ShowSysInfo;show system verbose
+baystack;command;baystack::ShowSysInfo;show interfaces gbic-info
+baystack;command;baystack::ShowSysInfo;show spanning-tree config
+baystack;command;baystack::ShowConfig;show running-config
